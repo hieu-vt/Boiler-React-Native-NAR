@@ -1,0 +1,123 @@
+default_platform(:ios)
+
+
+before_all do |lane|
+  environment = lane_context[SharedValues::ENVIRONMENT]
+  import('HelperFile')
+  unless environment.nil?
+      puts "Load .env file of #{environment}"
+      Dotenv.overload "../" + ENV['ENVFILE']
+
+      ANDROID_PROJECT_DIR = "android/"
+
+      ANDROID_VARIANT = "#{ENV['FLAVOR']}"
+
+      ANDROID_APK_OUTPUT_DIR = "#{ANDROID_PROJECT_DIR}app/build/outputs/apk/#{ANDROID_VARIANT}/release"
+
+      ANDROID_AAB_OUTPUT_DIR = "#{ANDROID_PROJECT_DIR}app/build/outputs/bundle/#{ANDROID_VARIANT}Release"
+      
+      ANDROID_AAB_BUILD_PATH_DEFAULT = "../#{ANDROID_AAB_OUTPUT_DIR}/app-#{ANDROID_VARIANT}-release.aab"
+      
+      ANDROID_APK_BUILD_PATH_DEFAULT = "../#{ANDROID_APK_OUTPUT_DIR}/app-#{ANDROID_VARIANT}-release.apk"
+     
+      ANDROID_BUILD_FILE_NAME = "#{ENV['APP_DISPLAY_NAME']}-Android-#{ENV['VERSION_NAME']}-#{ENV['VERSION_CODE']}"
+
+      ANDROID_APK_BUILD_PATH_UPLOAD = "#{ANDROID_APK_OUTPUT_DIR}/#{ANDROID_BUILD_FILE_NAME}.apk"
+
+      ANDROID_AAB_BUILD_PATH_UPLOAD = "#{ANDROID_AAB_OUTPUT_DIR}/#{ANDROID_BUILD_FILE_NAME}.aab"
+      
+      BUILD_IOS_FILENAME = "#{ENV['APP_DISPLAY_NAME']}-IOS-#{ENV['SCHEME_SUFFIX']}-#{ENV['VERSION_NAME']}-#{ENV['VERSION_CODE']}"
+  end
+end
+
+
+platform :ios do
+
+  desc "Upload IPA to TestFlight"
+    private_lane :ios_upload_to_TF do
+      if ENV['FASTLANE_USER']
+        upload_to_testflight({
+          app_identifier: ENV['BUNDLE_IDENTIFIER'],
+          username: ENV['FASTLANE_USER']
+        })
+      else
+        api_key = app_store_connect_api_key(
+          key_id: ENV["APPSTORE_CONNECT_KEY_ID"],
+          issuer_id: ENV["APPSTORE_CONNECT_ISSUER_ID"],
+          key_filepath: ENV["APPSTORE_CONNECT_KEY_PATH"],
+          duration: 1200, 
+          in_house: false
+        )
+        upload_to_testflight({
+          api_key: api_key,
+          ipa: "#{BUILD_IOS_FILENAME}.ipa",
+          skip_submission: true,
+          app_identifier: ENV['BUNDLE_IDENTIFIER']
+        })
+      end
+  end
+
+  desc "IOS build IPA then upload to TestFlight"
+  lane :test_flight_build do |params|
+    ios_build_ipa
+    ios_upload_to_TF
+    clean_cache
+  end 
+
+  desc "iOS remove build output file"
+  private_lane :clean_cache do
+    File.delete("../#{BUILD_IOS_FILENAME}.ipa") if File.exist?("../#{BUILD_IOS_FILENAME}.ipa")
+    File.delete("../#{BUILD_IOS_FILENAME}.app.dSYM.zip") if File.exist?("../#{BUILD_IOS_FILENAME}.app.dSYM.zip")
+  end
+
+  desc "IOS ipa"
+  private_lane :ios_build_ipa do
+    build_app(
+      workspace: "ios/#{ENV['WORKSPACE_NAME']}.xcworkspace",
+      scheme: "#{ENV['WORKSPACE_NAME']}-#{ENV['SCHEME_SUFFIX']}",
+      export_method: ENV['EXPORT_METHOD'],
+      output_name: "#{BUILD_IOS_FILENAME}.ipa",
+      export_options: {
+        provisioningProfiles: { 
+          "#{ENV['BUNDLE_IDENTIFIER']}" => "#{ENV['PUBLISH_PROVISIONING_PROFILE']}"
+        }
+      }
+    )
+  end
+end
+
+platform :android do 
+  desc "Android clean"
+  private_lane :clean_android do 
+     gradle(task: 'clean', project_dir: "#{ANDROID_PROJECT_DIR}", properties:{"defaultEnvFile" => ENV['ENVFILE']})
+  end
+
+  desc "Android build bundle(aab)"
+  private_lane :aab_android do
+     gradle(task: "bundle", build_type: "Release",flavor: "#{ANDROID_VARIANT}", project_dir: "#{ANDROID_PROJECT_DIR}" )
+     File.rename(ANDROID_AAB_BUILD_PATH_DEFAULT,  "../#{ANDROID_AAB_BUILD_PATH_UPLOAD}")
+  end
+
+  desc "Android build release(apk)"
+  private_lane :apk_android do
+     gradle(task: "assemble", build_type: "Release",flavor: "#{ANDROID_VARIANT}", project_dir: "#{ANDROID_PROJECT_DIR}" )
+     File.rename(ANDROID_APK_BUILD_PATH_DEFAULT,  "../#{ANDROID_APK_BUILD_PATH_UPLOAD}")
+  end
+
+  desc "Android build apk then upload to app center"
+  lane :google_internal do |params|
+    aab_android
+    if File.file?("../#{ENV["GOOGLE_API_KEY_PATH"]}")
+        upload_to_play_store(
+        package_name: ENV['BUNDLE_IDENTIFIER'],
+        track: 'internal',
+        release_status: 'draft',
+        skip_upload_apk: true,
+        aab: ANDROID_AAB_BUILD_PATH_UPLOAD,
+        json_key: ENV["GOOGLE_API_KEY_PATH"]
+      )
+    else
+      print "GOOGLE_API_KEY_PATH not found. You need to upload aab file manually"
+    end
+  end
+end
